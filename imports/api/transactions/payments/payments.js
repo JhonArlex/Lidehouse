@@ -9,7 +9,7 @@ import { moment } from 'meteor/momentjs:moment';
 import { __ } from '/imports/localization/i18n.js';
 import { ModalStack } from '/imports/ui_3/lib/modal-stack.js';
 import { Clock } from '/imports/utils/clock.js';
-import { debugAssert } from '/imports/utils/assert.js';
+import { debugAssert, productionAssert } from '/imports/utils/assert.js';
 import { equalWithinRounding } from '/imports/api/utils.js';
 import { Accounts } from '/imports/api/transactions/accounts/accounts.js';
 import { LocationTagsSchema } from '/imports/api/transactions/account-specification.js';
@@ -25,6 +25,17 @@ Math.smallerInAbs = function smallerInAbs(a, b) {
   if (a >= 0 && b >= 0) return Math.min(a, b);
   else if (a <= 0 && b <= 0) return Math.max(a, b);
   debugAssert(false); return undefined;
+};
+
+Array.oppositeSignsFirst = function oppositeSignsFirst(inputArray, number, key) {
+  const negatives = [];
+  const positives = [];
+  inputArray.forEach(elem => {
+    if (elem < 0 || elem[key] < 0) negatives.push(elem);
+    else positives.push(elem);
+  });
+  if (number >= 0) return negatives.concat(positives);
+  else return positives.concat(negatives);
 };
 
 export const Payments = {};
@@ -182,8 +193,6 @@ Transactions.categoryHelpers('payment', {
     this.payAccount = entry.account;
   },
   makeJournalEntries(accountingMethod) {
-//    const communityId = this.communityId;
-//    const cat = Txdefs.findOne({ communityId, category: 'payment', 'data.relation': this.relation });
     this.debit = [];
     this.credit = [];
     let unallocatedAmount = this.amount;
@@ -192,27 +201,54 @@ Transactions.categoryHelpers('payment', {
       if (unallocatedAmount === 0) return false;
       const bill = Transactions.findOne(billPaid.id);
       if (!bill.isPosted()) throw new Meteor.Error('Bill has to be posted first');
-      if (accountingMethod === 'accrual') {
-        bill[this.relationSide()].forEach(entry => {
+      productionAssert(billPaid.amount < 0 === bill.amount < 0, 'err_notAllowed', 'Bill amount and its payment must have the same sign');
+      let linesOrEntries;
+      if (accountingMethod === 'accrual') linesOrEntries = bill[this.relationSide()];
+      else if (accountingMethod === 'cash') linesOrEntries = bill.getLines();
+
+      if (billPaid.amount === bill.amount) {
+        linesOrEntries.forEach(entry => {
           if (unallocatedAmount === 0) return false;
-          const amount = equalWithinRounding(entry.amount, billPaid.amount) ? entry.amount : Math.smallerInAbs(entry.amount, billPaid.amount);
-          this[this.conteerSide()].push({ amount, account: entry.account, localizer: entry.localizer, parcelId: entry.parcelId, contractId: bill.contractId });
+          const amount = entry.amount;
+          this[this.conteerSide()].push({ amount: entry.amount, account: entry.account, localizer: entry.localizer, parcelId: entry.parcelId, contractId: bill.contractId });
           unallocatedAmount -= amount;
         });
-      } else if (accountingMethod === 'cash') {
-        bill.getLines().forEach(line => {
+      } else if (Math.abs(billPaid.amount) < Math.abs(bill.amount)) {
+        let paidBefore = 0;
+        bill.payments?.forEach(payment => {
+          if (payment.id !== this._id) paidBefore += payment.amount;
+        });
+        let unallocatedFromBill = billPaid.amount;
+        const billEntriesOrLines = Array.oppositeSignsFirst(linesOrEntries, bill.amount, 'amount');
+        billEntriesOrLines.forEach(entry => {
           if (unallocatedAmount === 0) return false;
-          if (!line) return true; // can be null, when a line is deleted from the array
-          const amount = Math.smallerInAbs(line.amount, billPaid.amount);
-          const parcelId = line.localizer && Parcels.findOne({ communityId: this.communityId, code: line.localizer })._id;
-          this[this.conteerSide()].push({ amount, account: line.account, localizer: line.localizer, parcelId, contractId: bill.contractId });
-          unallocatedAmount -= amount;
+          if (paidBefore === 0) {
+            let amount;
+            if (bill.amount >= 0) amount = entry.amount >= 0 ? Math.min(entry.amount, unallocatedAmount, unallocatedFromBill) : entry.amount;
+            if (bill.amount < 0) amount = entry.amount < 0 ? Math.max(entry.amount, unallocatedAmount, unallocatedFromBill) : entry.amount;
+            this[this.conteerSide()].push({ amount, account: entry.account, localizer: entry.localizer, parcelId: entry.parcelId, contractId: bill.contractId });
+            unallocatedAmount -= amount;
+            unallocatedFromBill -= amount;
+          } else if ((bill.amount >= 0 && paidBefore > 0) || (bill.amount < 0 && paidBefore < 0)) {
+            paidBefore -= entry.amount;
+          }
+          if ((bill.amount >= 0 && paidBefore < 0) || (bill.amount < 0 && paidBefore > 0)) {
+            const remainder = -paidBefore;
+            paidBefore = 0;
+            let amount;
+            if (bill.amount >= 0) amount = Math.min(remainder, unallocatedAmount, unallocatedFromBill);
+            if (bill.amount < 0) amount = Math.max(remainder, unallocatedAmount, unallocatedFromBill);
+            this[this.conteerSide()].push({ amount, account: entry.account, localizer: entry.localizer, parcelId: entry.parcelId, contractId: bill.contractId });
+            unallocatedAmount -= amount;
+            unallocatedFromBill -= amount;
+          }
         });
       }
+      debugAssert(Math.abs(billPaid.amount) <= Math.abs(bill.amount), "payed amount for a bill can not be more than bill's amount");
     });
     this.getLines().forEach(line => {
       if (unallocatedAmount === 0) return false;
-      if (!line) return true; // can be null, when a line is deleted from the array
+      productionAssert(unallocatedAmount < 0 === line.amount < 0, 'err_notAllowed', 'Bill amount and its payment must have the same sign');
       const amount = Math.smallerInAbs(line.amount, unallocatedAmount);
       this[this.conteerSide()].push({ amount, account: line.account, localizer: line.localizer, parcelId: line.parcelId, contractId: line.contractId });
       unallocatedAmount -= amount;

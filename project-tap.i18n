@@ -1,5 +1,5 @@
 {
-      "supported_languages": ["en", "hu"]
+      "supported_languages": ["en", "hu", "es"]
 //    "helper_name": "_",
 //    "i18n_files_route": "/tap-i18n",
 //    "cdn_path": null,

@@ -1,7 +1,7 @@
 import { SimpleSchema } from 'meteor/aldeed:simple-schema';
 
 export const HungarianAddressSchema = new SimpleSchema({
-  zip: { type: String, regEx: /^[0-9]{4}$/ },
+  zip: { type: String, regEx: /^[0-9]{6}$/ },
   city: { type: String, max: 100 },
   street: { type: String, max: 100 },
   number: { type: String, max: 100 },
